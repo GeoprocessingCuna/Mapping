@@ -1,0 +1,148 @@
+---
+title: "Mapa de Elevacao e Hidrologia"
+author: "Inacio Cuna"
+date: "2025-09-10"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(encoding = "UTF-8")
+# Em Windows, assegure uma locale compatível:
+if (.Platform$OS.type == "windows") {
+  # use a disponível; se falhar, não é crítico
+  try(Sys.setlocale("LC_CTYPE", "Portuguese_Brazil.1252"), silent = TRUE)
+}
+```
+Introdução
+
+A elaboração de mapas que combinem relevo e hidrografia é essencial para compreender a relação entre altitude, cursos d’água e ocupação do território. No caso de Moçambique, essas informações ajudam na agricultura, na gestão da água e na prevenção de desastres. O presente trabalho descreve, de forma didática, as etapas de construção de um mapa claro e acessível, evitando o uso de bases de dados muito grandes, para que possa ser executado em computadores pessoais.
+
+Objetivos
+Representar a altitude de Moçambique em classes coloridas e intuitivas.
+Mapear rios, lagos, reservatórios, barragens e diques a partir de bases abertas.
+Garantir clareza visual, permitindo que qualquer pessoa compreenda o mapa.
+Trabalhar com recortes menores, evitando arquivos pesados e lentos.
+
+Metodologia
+1. Carregar pacotes
+```{r}
+# Manipulação espacial
+library(terra)            # raster (altitude, contornos)
+library(sf)               # vetores
+library(dplyr)            # manipulação de tabelas
+library(tmap)             # visualização cartográfica
+library(rnaturalearth)    # dados globais (rios, lagos, cidades)
+library(geodata)          # dados de relevo e limites administrativos
+```
+
+2. Obtenção dos dados
+# Modelo digital de elevação (~1 km)
+```{r}
+moz <- elevation_30s(country = "Moz", path = tempdir())
+```
+
+# Limites administrativos (nível 1 = províncias)
+```{r}
+moz_adm1 <- geodata::gadm(country = "MOZ", level = 1, path = tempdir())
+moz_adm1 <- st_as_sf(moz_adm1) |> st_transform(4326)
+```
+# Fronteira nacional (união das províncias)
+
+```{r}
+moz_border <- moz_adm1 |> st_union()
+```
+
+# Hidrografia básica (Natural Earth)
+```{r}
+rios <- ne_download(scale = 10, type = "rivers_lake_centerlines",
+                    category = "physical", returnclass = "sf") |> st_transform(4326)
+lagos <- ne_download(scale = 10, type = "lakes",
+                     category = "physical", returnclass = "sf") |> st_transform(4326)
+```
+# Recorte para Moçambique
+
+```{r}
+rios_moz  <- st_intersection(rios, moz_border)
+lagos_moz <- suppressWarnings(st_intersection(st_make_valid(lagos), moz_border))
+```
+3. Preparação e filtragem
+# Separar rios principais (maiores comprimentos)
+```{r}
+rios_moz <- dplyr::mutate(rios_moz, .id_rio = dplyr::row_number())
+if ("scalerank" %in% names(rios_moz)) {
+  # se a coluna existir, use-a (<= 4 costuma ser “principal” na NE)
+  rios_principais <- dplyr::filter(rios_moz, scalerank <= 4)
+} else {
+  # fallback: top 15% por comprimento
+  comp <- as.numeric(sf::st_length(rios_moz))
+  thr  <- stats::quantile(comp, 0.85, na.rm = TRUE)
+  rios_principais <- rios_moz[comp >= thr, , drop = FALSE]
+}
+
+if (nrow(rios_principais) > 0) {
+  ids_princ    <- rios_principais$.id_rio
+  rios_menores <- dplyr::filter(rios_moz, !.id_rio %in% ids_princ)
+} else {
+  # caso extremo: se não houver “principais”, todos são “menores”
+  rios_menores <- rios_moz
+}
+```
+# Demais rios
+
+```{r}
+
+# Assuming 'sf_object_x' and 'sf_object_y' are your sf objects
+#rios_menores <- st_join(rios_moz, rios_principais, join = st_intersects)
+rios_moz <- dplyr::mutate(rios_moz, .id_rio = dplyr::row_number())
+rios_menores <- dplyr::filter(rios_moz, !.id_rio %in% ids_princ)
+
+```
+4. Representação cartográfica
+```{r}
+tmap_mode("plot")
+
+# Paleta de altitude (verde → marrom → branco)
+pal_alt <- c("#d9f0a3", "#addd8e", "#78c679",
+             "#41ab5d", "#238443", "#006837",
+             "#fee08b", "#fdae61", "#f46d43", "#d73027", "#a50026")
+```
+
+# Intervalos de altitude
+```{r}
+rng  <- unlist(terra::global(moz, "range", na.rm = TRUE))
+brks <- seq(floor(rng[1]/500)*500, ceiling(rng[2]/500)*500, by = 500)
+
+```
+# Construção do mapa
+
+```{r}
+mapa <- tm_shape(moz) +
+  tm_raster(col.scale  = tm_scale(values = pal_alt, breaks = brks),
+            col.legend = tm_legend(title = "Altitude (m)")) +
+
+  tm_shape(moz_adm1) + tm_borders(lwd = 1.1, col = "black") +
+  tm_text("NAME_1", size = 0.6, col = "black",
+          bg.color = "white", bg.alpha = 0.7) +
+
+  tm_shape(lagos_moz) + tm_polygons(fill = "lightblue", fill_alpha = 0.9) +
+  tm_shape(rios_menores) + tm_lines(col = "blue", lwd = 0.4) +
+  tm_shape(rios_principais) + tm_lines(col = "darkblue", lwd = 1.2) +
+
+  tm_add_legend(type = "lines", fill = "darkblue", lwd = 1.2, labels = "Rios principais") +
+  tm_add_legend(type = "lines", fill = "blue", lwd = 0.4, labels = "Rios menores") +
+  tm_add_legend(type = "polygons", fill = "lightblue", labels = "Lagos") +
+
+  tm_title("Moçambique — Altitude e Hidrografia", size = 1.4, position = c("center","top")) +
+  tm_layout(legend.outside = TRUE, legend.outside.position = "right",
+            frame = FALSE, inner.margins = c(0.05, 0.25, 0.05, 0.05)) +
+  tm_scalebar(position = c("left","bottom")) +
+  tm_compass(type = "8star", position = c("left","top"), size = 2) +
+  tm_credits("Fonte: GADM, Natural Earth, Geodata (UCDavis)\nProjecao: EPSG:4326 (WGS 84)\nAutor: Inacio Samuel Cuna", position = c("right","bottom"), size = 0.6)
+
+mapa
+```
+
