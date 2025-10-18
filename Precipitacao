@@ -1,0 +1,55 @@
+#Carregar Bibliotecas
+library(geodata)
+library(sf)
+library(stars)
+library(raster)
+library(terra)
+library(pals)
+library(tmap)
+
+# --- Baixar shapefile de Moçambique
+moz <- geodata::gadm(country = "MOZ", level = 1, path = tempdir())
+plot(moz)
+
+# --- Baixar dados de precipitação WorldClim (resolução 0.5°)
+prec <- geodata::worldclim_country("MOZ", "prec", res = 0.5, path = tempdir())
+#plot(prec)
+
+# --- Recortar os dados de precipitação para Moçambique
+prec_meso <- terra::crop(prec, moz, mask = TRUE)
+
+# --- Renomear camadas (meses)
+names(prec_meso) <- c("Jan", "Feb", "Mar", "Abr", "Mai", "Jun",
+                      "Jul", "Ago", "Set", "Out", "Nov", "Dez")
+
+# --- Somar para obter precipitação anual
+prec_meso_anual <- sum(prec_meso[[1:12]])
+
+# --- Boxplot mensal
+caixa<-boxplot(prec_meso, col = "lightblue", main = "Precipitação pluvial mensal")
+
+# --- Paleta de cores
+paleta <- rev(kovesi.rainbow_bgyr_35_85_c73(n = 15))
+
+# --- Mapa com tmap
+tmap_mode("plot")
+
+mapa <- tm_shape(prec_meso_anual) +
+  tm_raster(title = "Precipitação Anual (mm)", palette = paleta) +
+  
+  tm_shape(moz) +
+  tm_borders(lwd = 1.1, col = "black") +
+  tm_text("NAME_1", size = 0.6, col = "black", 
+          bg.color = "white", bg.alpha = 0.7) +
+  
+  tm_layout(main.title = "Moçambique — Precipitação Anual",
+            main.title.size = 1.4,
+            legend.outside = TRUE,
+            legend.outside.position = "right",
+            frame = FALSE, inner.margins = c(0.05, 0.15, 0.05, 0.05)) +
+  tm_scalebar(position = c("left", "bottom")) +
+  tm_compass(type = "8star", position = c("left", "top"), size = 2) +
+  tm_credits("Fonte: GADM, Wordclim, Geodata (UCDavis)\nProjeção: EPSG:4326 (WGS 84)\nAutor: Inacio Samuel Cuna",
+             position = c("right", "bottom"), size = 0.6)
+
+mapa
