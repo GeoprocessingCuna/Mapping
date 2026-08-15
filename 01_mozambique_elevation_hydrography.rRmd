@@ -1,0 +1,149 @@
+# ============================================================================
+# PROJECT: COFFEE PRECISION AGRICULTURE & REGIONAL AGROCLIMATIC MODELING
+# STEP 05: Topographic and Hydrographic Spatial Modeling - Mozambique
+# AUTHOR: Inácio Samuel Cuna | UFV / IIAM
+# REPOSITORY: @GeoprocessingCuna
+# ============================================================================
+
+# 1. LOAD SPATIAL PACKAGES ---------------------------------------------------
+# Core libraries for spatial data engineering and cartographic rendering
+library(terra)            # Advanced raster data processing (DEM manipulation)
+library(sf)               # Vector spatial features (Simple Features framework)
+library(dplyr)            # Declarative data manipulation and syntax grouping
+library(tmap)             # High-level thematic cartography engine
+library(rnaturalearth)    # Global baseline physical and political vectors
+library(geodata)          # Direct download pipelines for DEM and administrative data
+
+# 2. SET WORKING DIRECTORY & ENVIRONMENT -------------------------------------
+setwd("C:/Users/LENOVO/Desktop/UFV/Simea")
+
+options(encoding = "UTF-8")
+if (.Platform$OS.type == "windows") {
+  try(Sys.setlocale("LC_CTYPE", "English_United States.1252"), silent = TRUE)
+}
+
+# 3. SPATIAL DATA ACQUISITION AND STRUCTURAL ALIGNMENT -----------------------
+cat("\n[INFO] Downloading spatial datasets from global repositories...\n")
+
+# Fetch the Digital Elevation Model (DEM) from SRTM 30 arc-seconds (~1 km resolution)
+moz_dem <- elevation_30s(country = "Moz", path = tempdir())
+
+# Download national administrative boundaries (Level 1: Provincial divisions)
+moz_adm1 <- geodata::gadm(country = "MOZ", level = 1, path = tempdir())
+moz_adm1 <- sf::st_as_sf(moz_adm1) |> sf::st_transform(4326)
+
+# Unify provincial borders into a clean single-polygon national boundary vector
+moz_border <- sf::st_union(moz_adm1)
+
+# Stream baseline hydrographic assets from Natural Earth global categories
+global_rivers <- ne_download(scale = 10, type = "rivers_lake_centerlines",
+                             category = "physical", returnclass = "sf") |> sf::st_transform(4326)
+global_lakes  <- ne_download(scale = 10, type = "lakes",
+                             category = "physical", returnclass = "sf") |> sf::st_transform(4326)
+
+# Execute spatial intersection queries (Spatial Crop) to restrict vectors to Mozambique
+rivers_moz <- sf::st_intersection(global_rivers, moz_border)
+lakes_moz  <- suppressWarnings(sf::st_intersection(sf::st_make_valid(global_lakes), moz_border))
+
+# 4. DATA PROCESSING AND TOPOLOGICAL FILTERING -------------------------------
+cat("[INFO] Running stream network topological checks and ranking...\n")
+
+# Index the cropped river geometries for unique feature tracking
+rivers_moz <- dplyr::mutate(rivers_moz, .river_id = dplyr::row_number())
+
+# Execute stream network ranking using Natural Earth cartographic orders
+if ("scalerank" %in% names(rivers_moz)) {
+  # Standard scale rank filtering (Values <= 4 isolate major international catchments)
+  major_rivers <- dplyr::filter(rivers_moz, scalerank <= 4)
+} else {
+  # Fallback metric: Subset top 15% longest segments via strict length computation
+  stream_length <- as.numeric(sf::st_length(rivers_moz))
+  length_threshold <- stats::quantile(stream_length, 0.85, na.rm = TRUE)
+  major_rivers <- rivers_moz[stream_length >= length_threshold, , drop = FALSE]
+}
+
+# Isolate secondary stream segments using index exclusion to prevent data duplicates
+if (nrow(major_rivers) > 0) {
+  major_ids <- major_rivers$.river_id
+  minor_rivers <- dplyr::filter(rivers_moz, !.river_id %in% major_ids)
+} else {
+  minor_rivers <- rivers_moz
+}
+
+# 5. ADVANCED THEMATIC CARTOGRAPHY -------------------------------------------
+cat("[INFO] Rendering integrated terrain and basin map canvas...\n")
+tmap_mode("plot")
+
+# Topographic elevation color palette array (Optimized terrain ramp)
+elevation_palette <- c("#d9f0a3", "#addd8e", "#78c679",
+                       "#41ab5d", "#238443", "#006837",
+                       "#fee08b", "#fdae61", "#f46d43", "#d73027", "#a50026")
+
+# Compute global min/max elevation to define data breaks
+dem_range <- unlist(terra::global(moz_dem, "range", na.rm = TRUE))
+elevation_breaks <- seq(floor(dem_range[1]/500)*500, ceiling(dem_range[2]/500)*500, by = 500)
+
+# Build the integrated multi-source topographic and hydrographic map canvas
+# Modern tmap v4.0+ compliant syntax structure (Fixes legacy scale placement bugs)
+thematic_map <- tm_shape(moz_dem) +
+  tm_raster(
+    col = "ID", # Standard single band pointer for DEM
+    palette = elevation_palette,
+    breaks = elevation_breaks,
+    title = "Elevation (m)"
+  ) +
+  
+  tm_shape(moz_adm1) + 
+  tm_borders(lwd = 1.1, col = "black") +
+  tm_text("NAME_1", size = 0.6, col = "black", bg.color = "white", bg.alpha = 0.7) +
+  
+  tm_shape(lakes_moz) + 
+  tm_polygons(fill = "lightblue", fill_alpha = 0.9) +
+  
+  tm_shape(minor_rivers) + 
+  tm_lines(col = "blue", lwd = 0.4) +
+  
+  tm_shape(major_rivers) + 
+  tm_lines(col = "darkblue", lwd = 1.2) +
+  
+  # Inject explicit legend targets for non-raster vector layers
+  tm_add_legend(type = "lines", col = "darkblue", lwd = 1.2, labels = "Major Rivers") +
+  tm_add_legend(type = "lines", col = "blue", lwd = 0.4, labels = "Secondary Streams") +
+  tm_add_legend(type = "polygons", fill = "lightblue", labels = "Lakes & Reservoirs") +
+  
+  # Configure layout spatial constraints and descriptive metadata
+  tm_layout(
+    title = "Mozambique — Topography and Hydrography",
+    title.size = 1.2,
+    title.position = c("center", "top"),
+    legend.outside = TRUE,
+    legend.outside.position = "right",
+    frame = FALSE,
+    inner.margins = c(0.05, 0.25, 0.05, 0.05)
+  ) +
+  tm_scalebar(position = c("left", "bottom")) +
+  tm_compass(type = "8star", position = c("left", "top"), size = 2) +
+  tm_credits(
+    text = "Data Source: GADM, Natural Earth, Geodata (UCDavis)\nSpatial Reference: EPSG:4326 (WGS 84)\nAuthor: Inácio Samuel Cuna", 
+    position = c("right", "bottom"), 
+    size = 0.6
+  )
+
+# Display final thematic rendering inside RStudio plot viewer
+print(thematic_map)
+
+# 6. HIGH-RESOLUTION ARTIFACT EXPORTATION (300 DPI STANDARD) ----------------
+# Saves the rendered map directly to the workspace directory
+tmap_save(
+  tm = thematic_map,
+  filename = "Mozambique_Topography_Hydrography_300dpi.png",
+  width = 24.0,
+  height = 16.0,
+  units = "cm",
+  dpi = 300
+)
+
+cat("\n=======================================================\n")
+cat(" [SUCCESS] '05_mozambique_elevation_hydrography.R'     \n")
+cat(" Executed and map saved seamlessly at 300 DPI!         \n")
+cat("=======================================================\n")
